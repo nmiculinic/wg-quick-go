@@ -3,13 +3,14 @@ package wgctl
 import (
 	"bytes"
 	"encoding/base64"
+	"net"
+	"syscall"
+	"text/template"
+
 	"github.com/mdlayher/wireguardctrl"
 	"github.com/mdlayher/wireguardctrl/wgtypes"
 	"github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
-	"net"
-	"syscall"
-	"text/template"
 )
 
 type Config struct {
@@ -48,6 +49,12 @@ func (cfg *Config) String() string {
 	return string(b)
 }
 
+var cfgTemplate = template.Must(
+	template.
+		New("wg-cfg").
+		Funcs(template.FuncMap(map[string]interface{}{"wgKey": serializeKey})).
+		Parse(wgtypeTemplateSpec))
+
 func (cfg *Config) MarshalText() (text []byte, err error) {
 	buff := &bytes.Buffer{}
 	if err := cfgTemplate.Execute(buff, cfg); err != nil {
@@ -57,12 +64,12 @@ func (cfg *Config) MarshalText() (text []byte, err error) {
 }
 
 const wgtypeTemplateSpec = `[Interface]
-{{- range := .Address }}
+{{- range .Address }}
 Address = {{ . }}
-{{ end }}
-{{- range := .DNS }}
+{{- end }}
+{{- range .DNS }}
 DNS = {{ . }}
-{{ end }}
+{{- end }}
 PrivateKey = {{ .PrivateKey | wgKey }}
 {{- if .ListenPort }}{{ "\n" }}ListenPort = {{ .ListenPort }}{{ end }}
 {{- if .MTU }}{{ "\n" }}MTU = {{ .MTU }}{{ end }}
@@ -72,8 +79,8 @@ PrivateKey = {{ .PrivateKey | wgKey }}
 {{- if .PreDown }}{{ "\n" }}PreDown = {{ .PreDown }}{{ end }}
 {{- if .PostDown }}{{ "\n" }}PostDown = {{ .PostDown }}{{ end }}
 {{- if .SaveConfig }}{{ "\n" }}SaveConfig = {{ .SaveConfig }}{{ end }}
-
 {{- range .Peers }}
+{{- "\n" }}
 [Peer]
 PublicKey = {{ .PublicKey | wgKey }}
 AllowedIps = {{ range $i, $el := .AllowedIPs }}{{if $i}}, {{ end }}{{ $el }}{{ end }}
@@ -95,12 +102,6 @@ func ParseKey(key string) (wgtypes.Key, error) {
 	copy(pkey[:], pkeySlice[:])
 	return pkey, nil
 }
-
-var cfgTemplate = template.Must(
-	template.
-		New("wg-cfg").
-		Funcs(template.FuncMap(map[string]interface{}{"wgKey": serializeKey})).
-		Parse(wgtypeTemplateSpec))
 
 // Sync the config to the current setup for given interface
 func (cfg *Config) Sync(iface string, logger logrus.FieldLogger) error {
