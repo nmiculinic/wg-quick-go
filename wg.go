@@ -112,6 +112,7 @@ func (cfg *Config) Sync(iface string, logger logrus.FieldLogger) error {
 		wgLink := &netlink.GenericLink{
 			LinkAttrs: netlink.LinkAttrs{
 				Name: iface,
+				MTU:  cfg.MTU,
 			},
 			LinkType: "wireguard",
 		}
