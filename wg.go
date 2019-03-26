@@ -5,10 +5,9 @@ import (
 	"encoding/base64"
 	"github.com/mdlayher/wireguardctrl"
 	"github.com/mdlayher/wireguardctrl/wgtypes"
-	log "github.com/sirupsen/logrus"
+	"github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
 	"net"
-	"os/exec"
 	"syscall"
 	"text/template"
 )
@@ -16,12 +15,12 @@ import (
 type Config struct {
 	wgtypes.Config
 
-	// Address — a comma-separated list of IP (v4 or v6) addresses (optionally with CIDR masks) to be assigned to the interface. May be specified multiple times.
+	// Address list of IP (v4 or v6) addresses (optionally with CIDR masks) to be assigned to the interface. May be specified multiple times.
 	Address []*net.IPNet
 
-	// — a comma-separated list of IP (v4 or v6) addresses to be set as the interface’s DNS servers. May be specified multiple times. Upon bringing the interface up, this runs ‘resolvconf -a tun.INTERFACE -m 0 -x‘ and upon bringing it down, this runs ‘resolvconf -d tun.INTERFACE‘. If these particular invocations of resolvconf(8) are undesirable, the PostUp and PostDown keys below may be used instead.
+	// list of IP (v4 or v6) addresses to be set as the interface’s DNS servers. May be specified multiple times. Upon bringing the interface up, this runs ‘resolvconf -a tun.INTERFACE -m 0 -x‘ and upon bringing it down, this runs ‘resolvconf -d tun.INTERFACE‘. If these particular invocations of resolvconf(8) are undesirable, the PostUp and PostDown keys below may be used instead.
 	DNS []net.IP
-	// — if not specified, the MTU is automatically determined from the endpoint addresses or the system default route, which is usually a sane choice. However, to manually specify an MTU to override this automatic discovery, this value may be specified explicitly.
+	// —if not specified, the MTU is automatically determined from the endpoint addresses or the system default route, which is usually a sane choice. However, to manually specify an MTU to override this automatic discovery, this value may be specified explicitly.
 	MTU int
 
 	// Table — Controls the routing table to which routes are added. There are two special values: ‘off’ disables the creation of routes altogether, and ‘auto’ (the default) adds routes to the default table and enables special handling of default routes.
@@ -83,6 +82,7 @@ func serializeKey(key *wgtypes.Key) string {
 	return base64.StdEncoding.EncodeToString(key[:])
 }
 
+// Parses base64 encoded key
 func ParseKey(key string) (wgtypes.Key, error) {
 	var pkey wgtypes.Key
 	pkeySlice, err := base64.StdEncoding.DecodeString(key)
@@ -99,12 +99,13 @@ var cfgTemplate = template.Must(
 		Funcs(template.FuncMap(map[string]interface{}{"wgKey": serializeKey})).
 		Parse(wgtypeTemplateSpec))
 
-func (cfg *Config) Up(iface string) error {
-
+// Sync the config to the current setup for given interface
+func (cfg *Config) Sync(iface string, logger logrus.FieldLogger) error {
+	log := logger.WithField("iface", iface)
 	link, err := netlink.LinkByName(iface)
 	if err != nil {
 		if _, ok := err.(netlink.LinkNotFoundError); !ok {
-			log.Error(err, "cannot read link, probably doesn't exist")
+			log.WithError(err).Error("cannot read link")
 			return err
 		}
 		log.Info("link not found, creating")
@@ -115,24 +116,21 @@ func (cfg *Config) Up(iface string) error {
 			LinkType: "wireguard",
 		}
 		if err := netlink.LinkAdd(wgLink); err != nil {
-			log.Error(err, "cannot create link", "iface", iface)
+			log.WithError(err).Error("cannot create link")
 			return err
-		}
-		if err := exec.Command("ip", "link", "add", "dev", iface, "type", "wireguard").Run(); err != nil {
 		}
 
 		link, err = netlink.LinkByName(iface)
 		if err != nil {
-			log.Error(err, "cannot read link")
+			log.WithError(err).Error("cannot read link")
 			return err
 		}
 	}
-	log.Info("link", "type", link.Type(), "attrs", link.Attrs())
 	if err := netlink.LinkSetUp(link); err != nil {
-		log.Error(err, "cannot set link up", "type", link.Type(), "attrs", link.Attrs())
+		log.WithError(err).Error("cannot set link up")
 		return err
 	}
-	log.Info("set device up", "iface", iface)
+	log.Info("set device up")
 
 	cl, err := wireguardctrl.New()
 	if err != nil {
@@ -141,16 +139,16 @@ func (cfg *Config) Up(iface string) error {
 	}
 
 	if err := cl.ConfigureDevice(iface, cfg.Config); err != nil {
-		log.Error(err, "cannot configure device", "iface", iface)
+		log.WithError(err).Error("cannot configure device")
 		return err
 	}
 
-	if err := syncAddress(link, cfg); err != nil {
+	if err := syncAddress(link, cfg, log); err != nil {
 		log.Error(err, "cannot sync addresses")
 		return err
 	}
 
-	if err := syncRoutes(link, cfg); err != nil {
+	if err := syncRoutes(link, cfg, log); err != nil {
 		log.Error(err, "cannot sync routes")
 		return err
 	}
@@ -160,7 +158,7 @@ func (cfg *Config) Up(iface string) error {
 
 }
 
-func syncAddress(link netlink.Link, cfg *Config) error {
+func syncAddress(link netlink.Link, cfg *Config, log logrus.FieldLogger) error {
 	addrs, err := netlink.AddrList(link, syscall.AF_INET)
 	if err != nil {
 		log.Error(err, "cannot read link address")
@@ -173,40 +171,42 @@ func syncAddress(link netlink.Link, cfg *Config) error {
 	}
 
 	for _, addr := range cfg.Address {
+		log := log.WithField("addr", addr)
 		_, present := presentAddresses[addr.String()]
 		presentAddresses[addr.String()] = 2
 		if present {
-			log.Info("address present", "addr", addr, "iface", link.Attrs().Name)
+			log.Info("address present")
 			continue
 		}
 
 		if err := netlink.AddrAdd(link, &netlink.Addr{
 			IPNet: addr,
 		}); err != nil {
-			log.Error(err, "cannot add addr", "iface", link.Attrs().Name)
+			log.WithError(err).Error("cannot add addr")
 			return err
 		}
-		log.Info("address added", "addr", addr, "iface", link.Attrs().Name)
+		log.Info("address added")
 	}
 
 	for addr, p := range presentAddresses {
+		log := log.WithField("addr", addr)
 		if p < 2 {
 			nlAddr, err := netlink.ParseAddr(addr)
 			if err != nil {
-				log.Error(err, "cannot parse del addr", "iface", link.Attrs().Name, "addr", addr)
+				log.WithError(err).Error("cannot parse del addr")
 				return err
 			}
 			if err := netlink.AddrAdd(link, nlAddr); err != nil {
-				log.Error(err, "cannot delete addr", "iface", link.Attrs().Name, "addr", addr)
+				log.WithError(err).Error("cannot delete addr")
 				return err
 			}
-			log.Info("address deleted", "addr", addr, "iface", link.Attrs().Name)
+			log.Info("addr deleted")
 		}
 	}
 	return nil
 }
 
-func syncRoutes(link netlink.Link, cfg *Config) error {
+func syncRoutes(link netlink.Link, cfg *Config, log logrus.FieldLogger) error {
 	routes, err := netlink.RouteList(link, syscall.AF_INET)
 	if err != nil {
 		log.Error(err, "cannot read existing routes")
@@ -222,38 +222,40 @@ func syncRoutes(link netlink.Link, cfg *Config) error {
 		for _, rt := range peer.AllowedIPs {
 			_, present := presentRoutes[rt.String()]
 			presentRoutes[rt.String()] = 2
+			log := log.WithField("route", rt.String())
 			if present {
-				log.Info("route present", "iface", link.Attrs().Name, "route", rt.String())
+				log.Info("route present")
 				continue
 			}
 			if err := netlink.RouteAdd(&netlink.Route{
 				LinkIndex: link.Attrs().Index,
 				Dst:       &rt,
 			}); err != nil {
-				log.Error(err, "cannot setup route", "iface", link.Attrs().Name, "route", rt.String())
+				log.WithError(err).Error("cannot setup route")
 				return err
 			}
-			log.Info("route added", "iface", link.Attrs().Name, "route", rt.String())
+			log.Info("route added")
 		}
 	}
 
 	// Clean extra routes
 	for rtStr, p := range presentRoutes {
 		_, rt, err := net.ParseCIDR(rtStr)
+		log := log.WithField("route", rt.String())
 		if err != nil {
-			log.Info("cannot parse route", "iface", link.Attrs().Name, "route", rtStr)
+			log.WithError(err).Error("cannot parse route")
 			return err
 		}
 		if p < 2 {
-			log.Info("extra manual route found", "iface", link.Attrs().Name, "route", rt.String())
+			log.Info("extra manual route found")
 			if err := netlink.RouteDel(&netlink.Route{
 				LinkIndex: link.Attrs().Index,
 				Dst:       rt,
 			}); err != nil {
-				log.Error(err, "cannot setup route", "iface", link.Attrs().Name, "route", rt.String())
+				log.WithError(err).Error("cannot setup route")
 				return err
 			}
-			log.Info("route deleted", "iface", link.Attrs().Name, "route", rt)
+			log.Info("route deleted")
 		}
 	}
 	return nil
