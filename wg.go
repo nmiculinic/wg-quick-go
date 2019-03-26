@@ -19,21 +19,24 @@ type Config struct {
 	Address []*net.IPNet
 
 	// list of IP (v4 or v6) addresses to be set as the interface’s DNS servers. May be specified multiple times. Upon bringing the interface up, this runs ‘resolvconf -a tun.INTERFACE -m 0 -x‘ and upon bringing it down, this runs ‘resolvconf -d tun.INTERFACE‘. If these particular invocations of resolvconf(8) are undesirable, the PostUp and PostDown keys below may be used instead.
+	// Currently unsupported
 	DNS []net.IP
 	// —if not specified, the MTU is automatically determined from the endpoint addresses or the system default route, which is usually a sane choice. However, to manually specify an MTU to override this automatic discovery, this value may be specified explicitly.
 	MTU int
 
-	// Table — Controls the routing table to which routes are added. There are two special values: ‘off’ disables the creation of routes altogether, and ‘auto’ (the default) adds routes to the default table and enables special handling of default routes.
+	// Table — Controls the routing table to which routes are added.
 	Table int
 
 	// PreUp, PostUp, PreDown, PostDown — script snippets which will be executed by bash(1) before/after setting up/tearing down the interface, most commonly used to configure custom DNS options or firewall rules. The special string ‘%i’ is expanded to INTERFACE. Each one may be specified multiple times, in which case the commands are executed in order.
 
+	// Currently unsupported
 	PreUp    string
 	PostUp   string
 	PreDown  string
 	PostDown string
 
 	// SaveConfig — if set to ‘true’, the configuration is saved from the current state of the interface upon shutdown.
+	// Currently unsupported
 	SaveConfig bool
 }
 
@@ -216,7 +219,9 @@ func syncRoutes(link netlink.Link, cfg *Config, log logrus.FieldLogger) error {
 
 	presentRoutes := make(map[string]int, 0)
 	for _, r := range routes {
-		presentRoutes[r.Dst.String()] = 1
+		if r.Table == cfg.Table {
+			presentRoutes[r.Dst.String()] = 1
+		}
 	}
 
 	for _, peer := range cfg.Peers {
@@ -231,6 +236,7 @@ func syncRoutes(link netlink.Link, cfg *Config, log logrus.FieldLogger) error {
 			if err := netlink.RouteAdd(&netlink.Route{
 				LinkIndex: link.Attrs().Index,
 				Dst:       &rt,
+				Table:     cfg.Table,
 			}); err != nil {
 				log.WithError(err).Error("cannot setup route")
 				return err
@@ -252,6 +258,7 @@ func syncRoutes(link netlink.Link, cfg *Config, log logrus.FieldLogger) error {
 			if err := netlink.RouteDel(&netlink.Route{
 				LinkIndex: link.Attrs().Index,
 				Dst:       rt,
+				Table:     cfg.Table,
 			}); err != nil {
 				log.WithError(err).Error("cannot setup route")
 				return err
